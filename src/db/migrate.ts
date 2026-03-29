@@ -1,0 +1,113 @@
+/**
+ * Run with: npx ts-node src/db/migrate.ts
+ * Or after build: node dist/db/migrate.js
+ */
+import { Pool } from 'pg'
+import * as dotenv from 'dotenv'
+dotenv.config()
+
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT) || 5432,
+  database: process.env.DB_NAME || 'persona_ai',
+  user: process.env.DB_USER || 'persona',
+  password: process.env.DB_PASSWORD || 'persona_dev',
+})
+
+const SQL = `
+-- Enable pgvector
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Personas
+CREATE TABLE IF NOT EXISTS personas (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          TEXT NOT NULL,
+  slug          TEXT NOT NULL UNIQUE,
+  bio           TEXT,
+  avatar_url    TEXT,
+  tags          TEXT[] DEFAULT '{}',
+  status        TEXT NOT NULL DEFAULT 'pending',
+  persona_profile JSONB DEFAULT '{}',
+  total_chunks  INTEGER DEFAULT 0,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Sources (individual videos)
+CREATE TABLE IF NOT EXISTS sources (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  persona_id      UUID NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+  video_id        TEXT NOT NULL,
+  title           TEXT,
+  channel_url     TEXT,
+  transcript_text TEXT,
+  word_count      INTEGER DEFAULT 0,
+  language        TEXT,
+  caption_type    TEXT,
+  status          TEXT NOT NULL DEFAULT 'queued',
+  error           TEXT,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Knowledge chunks (embeddings live here)
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  persona_id      UUID NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+  source_id       UUID NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  chunk_index     INTEGER NOT NULL,
+  chunk_text      TEXT NOT NULL,
+  topic_summary   TEXT,
+  embedding       vector(1536),
+  tsvector_content tsvector GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Chat sessions
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  persona_ids UUID[] NOT NULL,
+  mode        TEXT NOT NULL DEFAULT 'learn',
+  title       TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Chat messages
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id      UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL,
+  content         TEXT NOT NULL,
+  chunk_ids       UUID[] DEFAULT '{}',
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_chunks_persona ON knowledge_chunks (persona_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_tsvector ON knowledge_chunks USING gin (tsvector_content);
+CREATE INDEX IF NOT EXISTS idx_sources_status ON sources (status);
+CREATE INDEX IF NOT EXISTS idx_sources_persona ON sources (persona_id);
+CREATE INDEX IF NOT EXISTS idx_personas_tags ON personas USING gin (tags);
+
+-- Vector index (run after data is loaded for best performance)
+-- CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON knowledge_chunks
+--   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+`
+
+async function run() {
+  const client = await pool.connect()
+  try {
+    console.log('Running migrations...')
+    await client.query(SQL)
+    console.log('Done.')
+  } finally {
+    client.release()
+    await pool.end()
+  }
+}
+
+run().catch((err) => {
+  console.error(err)
+  process.exit(1)
+})

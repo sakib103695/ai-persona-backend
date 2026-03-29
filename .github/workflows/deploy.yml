@@ -1,0 +1,63 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/persona-ai-backend:latest
+
+      - name: Setup SSH
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync docker-compose to VPS
+        run: |
+          rsync -az deploy/docker-compose.yml \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/persona-ai/docker-compose.yml
+
+      - name: Write .env on VPS
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
+            printf 'DB_HOST=postgres\nDB_PORT=5432\nDB_NAME=%s\nDB_USER=%s\nDB_PASSWORD=%s\nREDIS_HOST=redis\nREDIS_PORT=6379\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\nYT_REQUEST_DELAY_MS=%s\nNODE_ENV=production\nGHCR_OWNER=%s\n' \
+              '${{ secrets.DB_NAME }}' '${{ secrets.DB_USER }}' '${{ secrets.DB_PASSWORD }}' \
+              '${{ secrets.OPENROUTER_API_KEY }}' '${{ secrets.OPENAI_API_KEY }}' \
+              '${{ secrets.YT_REQUEST_DELAY_MS }}' '${{ github.repository_owner }}' \
+              > /opt/persona-ai/.env
+            chmod 600 /opt/persona-ai/.env
+          "
+
+      - name: Pull image, migrate, restart api + worker
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
+            set -e
+            cd /opt/persona-ai
+            docker compose pull api worker
+            docker compose --profile tools run --rm migrate
+            docker compose up -d api worker
+          "

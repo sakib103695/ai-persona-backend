@@ -35,18 +35,19 @@ jobs:
 
       - name: Setup SSH
         run: |
-          install -m 600 -D /dev/null ~/.ssh/id_ed25519
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Sync docker-compose to VPS
         run: |
-          rsync -az deploy/docker-compose.yml \
+          rsync -az -e "ssh -i ~/.ssh/deploy_key" deploy/docker-compose.yml \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/persona-ai/docker-compose.yml
 
       - name: Pull image, migrate, restart api + worker
         run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
             set -e
             cd /opt/persona-ai
             docker compose pull api worker

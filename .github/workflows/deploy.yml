@@ -41,17 +41,6 @@ jobs:
           rsync -az deploy/docker-compose.yml \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/persona-ai/docker-compose.yml
 
-      - name: Write .env on VPS
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
-            printf 'DB_HOST=postgres\nDB_PORT=5432\nDB_NAME=%s\nDB_USER=%s\nDB_PASSWORD=%s\nREDIS_HOST=redis\nREDIS_PORT=6379\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\nYT_REQUEST_DELAY_MS=%s\nNODE_ENV=production\nGHCR_OWNER=%s\n' \
-              '${{ secrets.DB_NAME }}' '${{ secrets.DB_USER }}' '${{ secrets.DB_PASSWORD }}' \
-              '${{ secrets.OPENROUTER_API_KEY }}' '${{ secrets.OPENAI_API_KEY }}' \
-              '${{ secrets.YT_REQUEST_DELAY_MS }}' '${{ github.repository_owner }}' \
-              > /opt/persona-ai/.env
-            chmod 600 /opt/persona-ai/.env
-          "
-
       - name: Pull image, migrate, restart api + worker
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "

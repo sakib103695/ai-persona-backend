@@ -91,6 +91,18 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value  TEXT NOT NULL
 );
 
+-- Channel URL on persona (so we can validate imports)
+ALTER TABLE personas ADD COLUMN IF NOT EXISTS channel_url TEXT;
+
+-- Backfill channel_url from sources
+UPDATE personas p
+SET channel_url = (
+  SELECT DISTINCT s.channel_url FROM sources s
+  WHERE s.persona_id = p.id AND s.channel_url IS NOT NULL
+  LIMIT 1
+)
+WHERE p.channel_url IS NULL;
+
 -- Unique constraint: one source per video per persona
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_persona_video ON sources (persona_id, video_id);
 

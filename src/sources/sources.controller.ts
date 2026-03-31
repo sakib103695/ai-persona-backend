@@ -12,6 +12,12 @@ export class SourcesController {
     return this.sources.importChannels(body.urls)
   }
 
+  /** POST /api/sources/add — add videos to an existing persona */
+  @Post('add')
+  addToPersona(@Body() body: { persona_id: string; url: string }) {
+    return this.sources.addToPersona(body.persona_id, body.url)
+  }
+
   /** GET /api/sources?persona_id=xxx&page=1&limit=50&filter=all */
   @Get()
   getByPersona(

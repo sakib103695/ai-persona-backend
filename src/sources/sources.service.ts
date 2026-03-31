@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common'
+import { Injectable, Inject, BadRequestException } from '@nestjs/common'
 import { Pool } from 'pg'
 import { Queue } from 'bullmq'
 import { DB_POOL } from '../db/db.module'
@@ -50,11 +50,11 @@ export class SourcesService {
       const slug = slugify(name)
 
       const { rows } = await this.pool.query<{ id: string }>(
-        `INSERT INTO personas (name, slug, status)
-         VALUES ($1, $2, 'pending')
+        `INSERT INTO personas (name, slug, status, channel_url)
+         VALUES ($1, $2, 'pending', $3)
          ON CONFLICT (slug) DO UPDATE SET status = 'pending', updated_at = NOW()
          RETURNING id`,
-        [name, slug],
+        [name, slug, url],
       )
       const persona_id = rows[0].id
 
@@ -63,6 +63,76 @@ export class SourcesService {
     }
 
     return results
+  }
+
+  /** Add videos to an existing persona — validates channel URL or allows individual video URLs */
+  async addToPersona(personaId: string, url: string) {
+    const { rows: personaRows } = await this.pool.query<{ id: string; channel_url: string | null }>(
+      `SELECT id, channel_url FROM personas WHERE id = $1`,
+      [personaId],
+    )
+    if (personaRows.length === 0) throw new BadRequestException('Persona not found')
+    const persona = personaRows[0]
+
+    const isChannelUrl = /youtube\.com\/(@|c\/|channel\/)/.test(url)
+    const isVideoUrl = /youtube\.com\/watch\?v=|youtu\.be\//.test(url)
+
+    if (isChannelUrl) {
+      // Validate channel matches
+      const incomingChannel = extractChannelName(url).toLowerCase()
+      if (persona.channel_url) {
+        const existingChannel = extractChannelName(persona.channel_url).toLowerCase()
+        if (incomingChannel !== existingChannel) {
+          throw new BadRequestException(
+            `This persona belongs to @${existingChannel}. You can't import a different channel (@${incomingChannel}). Use individual video URLs to add content from other channels.`
+          )
+        }
+      } else {
+        // First channel import — set it
+        await this.pool.query(
+          `UPDATE personas SET channel_url = $1, updated_at = NOW() WHERE id = $2`,
+          [url, personaId],
+        )
+      }
+
+      await this.pool.query(
+        `UPDATE personas SET status = 'pending', updated_at = NOW() WHERE id = $1`,
+        [personaId],
+      )
+      await this.channelQueue.add('scrape', { url, persona_id: personaId })
+      return { type: 'channel', persona_id: personaId }
+    }
+
+    if (isVideoUrl) {
+      // Extract video ID
+      const videoIdMatch = url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)
+      if (!videoIdMatch) throw new BadRequestException('Invalid YouTube video URL')
+      const videoId = videoIdMatch[1]
+
+      // Insert source and queue for transcript
+      const { rows } = await this.pool.query<{ id: string }>(
+        `INSERT INTO sources (persona_id, video_id, title, status)
+         VALUES ($1, $2, $3, 'queued')
+         ON CONFLICT (persona_id, video_id) DO NOTHING
+         RETURNING id`,
+        [personaId, videoId, 'Loading...'],
+      )
+      if (rows[0]) {
+        await this.pool.query(
+          `UPDATE personas SET status = 'processing', updated_at = NOW() WHERE id = $1`,
+          [personaId],
+        )
+        await this.videoTranscriptQueue.add(
+          'transcript',
+          { source_id: rows[0].id, video_id: videoId, persona_id: personaId },
+          { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+        )
+        return { type: 'video', persona_id: personaId, source_id: rows[0].id }
+      }
+      return { type: 'video', persona_id: personaId, already_exists: true }
+    }
+
+    throw new BadRequestException('URL must be a YouTube channel or video URL')
   }
 
   /** Fetch transcript text for a single source */

@@ -206,9 +206,21 @@ export class SourcesService {
     // Mark all queued (unstarted) sources as failed so they don't get picked up
     const { rowCount } = await this.pool.query(
       `UPDATE sources SET status = 'failed', error = 'Import cancelled', updated_at = NOW()
-       WHERE persona_id = $1 AND status = 'queued'`,
+       WHERE persona_id = $1 AND status IN ('queued', 'processing')`,
       [personaId],
     )
+
+    // Update persona status: if all sources are done/failed, mark as ready
+    const { rows: pending } = await this.pool.query(
+      `SELECT COUNT(*) AS cnt FROM sources WHERE persona_id = $1 AND status NOT IN ('done', 'embedded', 'failed')`,
+      [personaId],
+    )
+    if (Number(pending[0].cnt) === 0) {
+      await this.pool.query(
+        `UPDATE personas SET status = 'ready', updated_at = NOW() WHERE id = $1`,
+        [personaId],
+      )
+    }
 
     return { cancelled: true, jobs_removed: jobsRemoved, sources_cancelled: rowCount ?? 0 }
   }

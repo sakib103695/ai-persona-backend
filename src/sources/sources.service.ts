@@ -237,7 +237,8 @@ export class SourcesService {
     const transcribing = Number(r.transcribing)
     const chunking = Number(r.chunking)
     const queued = Number(r.queued)
-    const percent = activeTotal > 0 ? Math.round(((done + failed) / activeTotal) * 100) : 0
+    const processed = done + failed
+    const percent = activeTotal > 0 ? Math.round((processed / activeTotal) * 100) : 0
 
     let current_step = 'queued'
     if (chunking > 0) current_step = 'chunking-and-embedding'
@@ -246,7 +247,7 @@ export class SourcesService {
 
     return {
       total_videos: activeTotal,
-      completed: done,
+      completed: processed,
       failed,
       queued,
       transcribing,

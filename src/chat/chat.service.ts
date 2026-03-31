@@ -13,9 +13,10 @@ const PERSONA_COLORS = [
 
 const MODE_INSTRUCTIONS: Record<Mode, string> = {
   learn: `Your role is to help the user learn and understand the ideas, frameworks, and strategies
-    covered in the knowledge base. Explain concepts clearly. Use specific examples. Break down
-    complex ideas step by step. Reference specific topics when relevant. Use [1], [2] etc to
-    cite sources inline when making claims from the knowledge base.`,
+    covered in the knowledge base. ONLY use information from the knowledge base below — do not
+    use outside knowledge. If the knowledge base doesn't contain relevant information, say so.
+    Explain concepts clearly. Use specific examples from the sources. Break down complex ideas
+    step by step. Use [1], [2] etc to cite sources inline for every claim.`,
 
   advisor: `Your role is to apply the knowledge base to the user's specific situation.
     Give actionable advice grounded in the frameworks and terminology from the sources.

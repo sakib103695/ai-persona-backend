@@ -141,6 +141,7 @@ export class SourcesService {
 
   /** Live import progress for a persona — polled by the ImportModal */
   async getImportStatus(personaId: string) {
+    // Exclude 'listed' sources — they're just catalogued, not being processed
     const { rows } = await this.pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'queued')                AS queued,
@@ -149,7 +150,8 @@ export class SourcesService {
          COUNT(*) FILTER (WHERE status IN ('done', 'embedded'))   AS done,
          COUNT(*) FILTER (WHERE status = 'failed')                AS failed,
          COUNT(*)                                                  AS total,
-         COALESCE(SUM(word_count), 0)                             AS total_words,
+         COUNT(*) FILTER (WHERE status = 'listed')                AS listed,
+         COALESCE(SUM(word_count) FILTER (WHERE status != 'listed'), 0) AS total_words,
          (SELECT title FROM sources
           WHERE persona_id = $1 AND status IN ('processing', 'transcribed')
           ORDER BY updated_at DESC LIMIT 1)                        AS current_video
@@ -158,7 +160,8 @@ export class SourcesService {
       [personaId],
     )
     const r = rows[0]
-    const total = Number(r.total)
+    const listed = Number(r.listed)
+    const activeTotal = Number(r.total) - listed
     const done = Number(r.done)
     const failed = Number(r.failed)
     const transcribing = Number(r.transcribing)
@@ -170,20 +173,21 @@ export class SourcesService {
       transcribing * 0.4 +
       chunking     * 0.75 +
       (done + failed) * 1.0
-    const percent = total > 0 ? Math.round((weightedDone / total) * 100) : 0
+    const percent = activeTotal > 0 ? Math.round((weightedDone / activeTotal) * 100) : 0
 
     let current_step = 'queued'
     if (chunking > 0) current_step = 'chunking-and-embedding'
     else if (transcribing > 0) current_step = 'extracting-transcript'
-    else if (done > 0 && queued === 0 && transcribing === 0 && chunking === 0) current_step = 'complete'
+    else if (activeTotal > 0 && queued === 0 && transcribing === 0 && chunking === 0) current_step = 'complete'
 
     return {
-      total_videos: total,
+      total_videos: activeTotal,
       completed: done,
       failed,
       queued,
       transcribing,
       chunking,
+      listed,
       in_progress: r.current_video || '',
       current_step,
       total_words_extracted: Number(r.total_words),

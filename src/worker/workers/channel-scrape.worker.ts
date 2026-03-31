@@ -20,13 +20,8 @@ export const channelScrapeWorker = new Worker(
     )
     const videoLimit = parseInt(settingRows[0]?.value ?? '0', 10)
 
-    let videos = await getChannelVideoIds(url)
-    console.log(`[channel-scrape] Found ${videos.length} videos`)
-
-    if (videoLimit > 0 && videos.length > videoLimit) {
-      videos = videos.slice(0, videoLimit)
-      console.log(`[channel-scrape] Limiting to ${videoLimit} videos`)
-    }
+    const videos = await getChannelVideoIds(url, videoLimit)
+    console.log(`[channel-scrape] Found ${videos.length} videos${videoLimit > 0 ? ` (limit: ${videoLimit})` : ''}`)
 
     // Step 1: Insert all source records at once so the total count is accurate
     const insertedIds: { id: string; video_id: string }[] = []

@@ -90,7 +90,7 @@ export interface VideoMeta {
   title: string
 }
 
-export async function getChannelVideoIds(channelUrl: string): Promise<VideoMeta[]> {
+export async function getChannelVideoIds(channelUrl: string, limit = 0): Promise<VideoMeta[]> {
   let url = channelUrl.replace(/\/$/, '')
   if (!url.includes('/videos')) url += '/videos'
 
@@ -144,8 +144,8 @@ export async function getChannelVideoIds(channelUrl: string): Promise<VideoMeta[
   findVideos(data)
   let continuation = findContinuation(data)
 
-  // Follow continuation tokens to get all videos
-  while (continuation) {
+  // Follow continuation tokens to get more videos (stop early if limit reached)
+  while (continuation && (limit === 0 || videoIds.length < limit)) {
     const browseRes = await fetch(
       `https://www.youtube.com/youtubei/v1/browse?key=${apiKey}&prettyPrint=false`,
       {
@@ -173,7 +173,8 @@ export async function getChannelVideoIds(channelUrl: string): Promise<VideoMeta[
     console.log(`[channel-scrape] Paginated: ${videoIds.length} videos so far`)
   }
 
-  return videoIds.filter((v) => v.id.length === 11 && /^[a-zA-Z0-9_-]+$/.test(v.id))
+  const filtered = videoIds.filter((v) => v.id.length === 11 && /^[a-zA-Z0-9_-]+$/.test(v.id))
+  return limit > 0 ? filtered.slice(0, limit) : filtered
 }
 
 export interface TranscriptResult {

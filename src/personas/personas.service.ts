@@ -10,9 +10,10 @@ export class PersonasService {
     const { rows } = await this.pool.query(
       `SELECT p.id, p.name, p.slug, p.bio, p.avatar_url, p.tags, p.total_chunks, p.created_at,
               CASE
+                WHEN p.total_chunks > 0 THEN 'ready'
                 WHEN p.persona_profile IS NOT NULL AND p.persona_profile != '{}'::jsonb THEN 'ready'
-                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing')) THEN 'processing'
-                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id) THEN 'ready'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing', 'transcribed')) THEN 'processing'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status NOT IN ('listed')) THEN 'ready'
                 ELSE p.status
               END AS status
        FROM personas p
@@ -25,9 +26,10 @@ export class PersonasService {
     const { rows } = await this.pool.query(
       `SELECT p.*,
               CASE
+                WHEN p.total_chunks > 0 THEN 'ready'
                 WHEN p.persona_profile IS NOT NULL AND p.persona_profile != '{}'::jsonb THEN 'ready'
-                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing')) THEN 'processing'
-                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id) THEN 'ready'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing', 'transcribed')) THEN 'processing'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status NOT IN ('listed')) THEN 'ready'
                 ELSE p.status
               END AS status
        FROM personas p WHERE p.id = $1`,

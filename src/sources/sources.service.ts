@@ -167,13 +167,7 @@ export class SourcesService {
     const transcribing = Number(r.transcribing)
     const chunking = Number(r.chunking)
     const queued = Number(r.queued)
-    // Weighted progress: each pipeline stage counts for partial credit
-    // queued=0%, transcribing=40%, transcribed/chunking=75%, done/failed=100%
-    const weightedDone =
-      transcribing * 0.4 +
-      chunking     * 0.75 +
-      (done + failed) * 1.0
-    const percent = activeTotal > 0 ? Math.round((weightedDone / activeTotal) * 100) : 0
+    const percent = activeTotal > 0 ? Math.round(((done + failed) / activeTotal) * 100) : 0
 
     let current_step = 'queued'
     if (chunking > 0) current_step = 'chunking-and-embedding'

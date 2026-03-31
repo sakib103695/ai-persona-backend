@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value  TEXT NOT NULL
 );
 
+-- Unique constraint: one source per video per persona
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_persona_video ON sources (persona_id, video_id);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_persona ON knowledge_chunks (persona_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsvector ON knowledge_chunks USING gin (tsvector_content);

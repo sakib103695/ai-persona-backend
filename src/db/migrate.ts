@@ -85,6 +85,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- App settings (key-value)
+CREATE TABLE IF NOT EXISTS app_settings (
+  key    TEXT PRIMARY KEY,
+  value  TEXT NOT NULL
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_persona ON knowledge_chunks (persona_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsvector ON knowledge_chunks USING gin (tsvector_content);

@@ -7,8 +7,8 @@ export class ChatController {
   constructor(private readonly chat: ChatService) {}
 
   @Post('sessions')
-  createSession(@Body() body: { persona_ids: string[]; mode: 'learn' | 'advisor' | 'research' }) {
-    return this.chat.createSession(body.persona_ids, body.mode)
+  createSession(@Body() body: { persona_ids: string[]; mode: 'learn' | 'advisor' | 'research'; source_ids?: string[] }) {
+    return this.chat.createSession(body.persona_ids, body.mode, body.source_ids)
   }
 
   @Get('sessions/:id')

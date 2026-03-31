@@ -4,11 +4,13 @@ import { DbModule } from './db/db.module'
 import { PersonasModule } from './personas/personas.module'
 import { SourcesModule } from './sources/sources.module'
 import { ChatModule } from './chat/chat.module'
+import { SettingsModule } from './settings/settings.module'
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     DbModule,
+    SettingsModule,
     PersonasModule,
     SourcesModule,
     ChatModule,

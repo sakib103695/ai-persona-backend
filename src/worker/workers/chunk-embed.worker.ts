@@ -20,9 +20,38 @@ interface Chunk {
   text: string
 }
 
-async function chunkTranscript(transcript: string): Promise<Chunk[]> {
+const WINDOW_SIZE = 10000
+const WINDOW_OVERLAP = 1500
+
+function splitIntoWindows(text: string): string[] {
+  const stride = WINDOW_SIZE - WINDOW_OVERLAP
+  const windows: string[] = []
+  for (let i = 0; i < text.length; i += stride) {
+    windows.push(text.slice(i, i + WINDOW_SIZE))
+    if (i + WINDOW_SIZE >= text.length) break
+  }
+  return windows.length > 0 ? windows : [text]
+}
+
+function deduplicateChunks(chunks: Chunk[]): Chunk[] {
+  const unique: Chunk[] = []
+  for (const chunk of chunks) {
+    const isDuplicate = unique.some((existing) => {
+      const shorter = chunk.text.length < existing.text.length ? chunk.text : existing.text
+      const longer = chunk.text.length >= existing.text.length ? chunk.text : existing.text
+      return longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.8)))
+    })
+    if (!isDuplicate) unique.push(chunk)
+  }
+  return unique
+}
+
+async function chunkWindow(window: string): Promise<Chunk[]> {
+  const { rows } = await pool.query(`SELECT value FROM app_settings WHERE key = 'chunk_model'`)
+  const model = rows[0]?.value || 'mistralai/mistral-7b-instruct'
+
   const response = await openrouter.chat.completions.create({
-    model: 'anthropic/claude-haiku-4-5-20251001',
+    model,
     max_tokens: 4096,
     messages: [
       {
@@ -36,26 +65,45 @@ Return a JSON array of objects with:
 Return ONLY valid JSON, no other text.
 
 Transcript:
-${transcript.substring(0, 12000)}`,
+${window}`,
       },
     ],
   })
 
-  try {
-    const raw = response.choices[0].message.content ?? ''
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    const words = transcript.split(/\s+/)
-    const chunks: Chunk[] = []
-    for (let i = 0; i < words.length; i += 600) {
-      chunks.push({
-        topic_summary: `Content segment ${Math.floor(i / 600) + 1}`,
-        text: words.slice(i, i + 600).join(' '),
-      })
-    }
-    return chunks
+  const raw = (response.choices[0].message.content ?? '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+  const parsed = JSON.parse(raw)
+  return Array.isArray(parsed) ? parsed : []
+}
+
+function fallbackChunk(transcript: string): Chunk[] {
+  const words = transcript.split(/\s+/)
+  const chunks: Chunk[] = []
+  const CHUNK_SIZE = 600
+  const STRIDE = 500
+  for (let i = 0; i < words.length; i += STRIDE) {
+    chunks.push({
+      topic_summary: `Content segment ${Math.floor(i / STRIDE) + 1}`,
+      text: words.slice(i, i + CHUNK_SIZE).join(' '),
+    })
   }
+  return chunks
+}
+
+async function chunkTranscript(transcript: string): Promise<Chunk[]> {
+  const windows = splitIntoWindows(transcript)
+  const allChunks: Chunk[] = []
+
+  for (const window of windows) {
+    try {
+      const windowChunks = await chunkWindow(window)
+      allChunks.push(...windowChunks)
+    } catch {
+      allChunks.push(...fallbackChunk(window))
+    }
+  }
+
+  const result = allChunks.length > 0 ? deduplicateChunks(allChunks) : fallbackChunk(transcript)
+  return result
 }
 
 async function embedTexts(texts: string[]): Promise<number[][]> {
@@ -121,7 +169,7 @@ export const chunkEmbedWorker = new Worker(
 
     return { chunks_created: chunks.length }
   },
-  { connection, concurrency: 1 },
+  { connection, concurrency: 1, lockDuration: 300000, lockRenewTime: 60000 },
 )
 
 chunkEmbedWorker.on('failed', (job, err) => {

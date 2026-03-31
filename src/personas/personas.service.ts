@@ -8,14 +8,29 @@ export class PersonasService {
 
   async findAll() {
     const { rows } = await this.pool.query(
-      'SELECT id, name, slug, bio, avatar_url, tags, status, total_chunks, created_at FROM personas ORDER BY created_at DESC',
+      `SELECT p.id, p.name, p.slug, p.bio, p.avatar_url, p.tags, p.total_chunks, p.created_at,
+              CASE
+                WHEN p.persona_profile IS NOT NULL AND p.persona_profile != '{}'::jsonb THEN 'ready'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing')) THEN 'processing'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id) THEN 'ready'
+                ELSE p.status
+              END AS status
+       FROM personas p
+       ORDER BY p.created_at DESC`,
     )
     return rows
   }
 
   async findOne(id: string) {
     const { rows } = await this.pool.query(
-      'SELECT * FROM personas WHERE id = $1',
+      `SELECT p.*,
+              CASE
+                WHEN p.persona_profile IS NOT NULL AND p.persona_profile != '{}'::jsonb THEN 'ready'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id AND s.status IN ('queued', 'processing')) THEN 'processing'
+                WHEN EXISTS (SELECT 1 FROM sources s WHERE s.persona_id = p.id) THEN 'ready'
+                ELSE p.status
+              END AS status
+       FROM personas p WHERE p.id = $1`,
       [id],
     )
     if (!rows[0]) throw new NotFoundException(`Persona ${id} not found`)
@@ -42,5 +57,37 @@ export class PersonasService {
       `UPDATE personas SET persona_profile = $1, tags = $2, status = 'ready', updated_at = NOW() WHERE id = $3`,
       [JSON.stringify(profile), tags, id],
     )
+  }
+
+  async update(id: string, data: { name?: string; bio?: string; tags?: string[]; avatar_url?: string }) {
+    const sets: string[] = []
+    const values: any[] = []
+    let idx = 1
+
+    if (data.name !== undefined) { sets.push(`name = $${idx++}`); values.push(data.name) }
+    if (data.bio !== undefined) { sets.push(`bio = $${idx++}`); values.push(data.bio) }
+    if (data.tags !== undefined) { sets.push(`tags = $${idx++}`); values.push(data.tags) }
+    if (data.avatar_url !== undefined) { sets.push(`avatar_url = $${idx++}`); values.push(data.avatar_url) }
+
+    if (sets.length === 0) return this.findOne(id)
+
+    sets.push(`updated_at = NOW()`)
+    values.push(id)
+
+    const { rows } = await this.pool.query(
+      `UPDATE personas SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+      values,
+    )
+    if (!rows[0]) throw new NotFoundException(`Persona ${id} not found`)
+    return rows[0]
+  }
+
+  async delete(id: string) {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM personas WHERE id = $1`,
+      [id],
+    )
+    if (!rowCount) throw new NotFoundException(`Persona ${id} not found`)
+    return { deleted: true }
   }
 }

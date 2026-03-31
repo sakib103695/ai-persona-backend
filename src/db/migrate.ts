@@ -67,11 +67,13 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
 CREATE TABLE IF NOT EXISTS chat_sessions (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   persona_ids UUID[] NOT NULL,
+  source_ids  UUID[] DEFAULT NULL,
   mode        TEXT NOT NULL DEFAULT 'learn',
   title       TEXT,
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS source_ids UUID[] DEFAULT NULL;
 
 -- Chat messages
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -90,9 +92,18 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources (status);
 CREATE INDEX IF NOT EXISTS idx_sources_persona ON sources (persona_id);
 CREATE INDEX IF NOT EXISTS idx_personas_tags ON personas USING gin (tags);
 
--- Vector index (run after data is loaded for best performance)
--- CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON knowledge_chunks
---   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Vector index (created conditionally after data exists)
+DO $$
+BEGIN
+  IF (SELECT COUNT(*) FROM knowledge_chunks) > 100 THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes WHERE indexname = 'idx_chunks_embedding'
+    ) THEN
+      CREATE INDEX idx_chunks_embedding ON knowledge_chunks
+        USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+    END IF;
+  END IF;
+END $$;
 `
 
 async function run() {

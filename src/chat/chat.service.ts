@@ -1,6 +1,7 @@
 import { Injectable, Inject } from '@nestjs/common'
 import { Pool } from 'pg'
 import { DB_POOL } from '../db/db.module'
+import { SettingsService } from '../settings/settings.service'
 import OpenAI from 'openai'
 
 type Mode = 'learn' | 'advisor' | 'research'
@@ -34,12 +35,15 @@ export class ChatService {
 
   private openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
-  constructor(@Inject(DB_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(DB_POOL) private readonly pool: Pool,
+    private readonly settingsService: SettingsService,
+  ) {}
 
-  async createSession(personaIds: string[], mode: Mode) {
+  async createSession(personaIds: string[], mode: Mode, sourceIds?: string[]) {
     const { rows } = await this.pool.query(
-      `INSERT INTO chat_sessions (persona_ids, mode) VALUES ($1, $2) RETURNING *`,
-      [personaIds, mode],
+      `INSERT INTO chat_sessions (persona_ids, mode, source_ids) VALUES ($1, $2, $3) RETURNING *`,
+      [personaIds, mode, sourceIds?.length ? sourceIds : null],
     )
     return rows[0]
   }
@@ -61,18 +65,20 @@ export class ChatService {
     return rows
   }
 
-  /** Hybrid vector + BM25 retrieval */
-  async retrieveChunks(personaIds: string[], queryEmbedding: number[], query: string) {
+  /** Hybrid vector + BM25 retrieval, optionally scoped to specific source_ids */
+  async retrieveChunks(personaIds: string[], queryEmbedding: number[], query: string, sourceIds?: string[] | null) {
     const embeddingStr = `[${queryEmbedding.join(',')}]`
+    const sourceFilter = sourceIds?.length ? 'AND kc.source_id = ANY($3)' : ''
 
     const { rows: vectorRows } = await this.pool.query(
       `SELECT kc.id, kc.chunk_text, kc.topic_summary, kc.source_id, kc.persona_id,
               1 - (kc.embedding <=> $1::vector) AS vector_score
        FROM knowledge_chunks kc
        WHERE kc.persona_id = ANY($2) AND kc.embedding IS NOT NULL
+         ${sourceFilter}
        ORDER BY kc.embedding <=> $1::vector
        LIMIT 20`,
-      [embeddingStr, personaIds],
+      sourceIds?.length ? [embeddingStr, personaIds, sourceIds] : [embeddingStr, personaIds],
     )
 
     const { rows: keywordRows } = await this.pool.query(
@@ -81,9 +87,10 @@ export class ChatService {
        FROM knowledge_chunks kc
        WHERE kc.persona_id = ANY($2)
          AND kc.tsvector_content @@ plainto_tsquery('english', $1)
+         ${sourceFilter}
        ORDER BY keyword_score DESC
        LIMIT 20`,
-      [query, personaIds],
+      sourceIds?.length ? [query, personaIds, sourceIds] : [query, personaIds],
     )
 
     const merged = new Map<string, any>()
@@ -100,7 +107,8 @@ export class ChatService {
 
     return [...merged.values()]
       .sort((a, b) => b.final_score - a.final_score)
-      .slice(0, 5)
+      .filter((r) => r.final_score >= 0.15)
+      .slice(0, 12)
   }
 
   /** Enrich raw chunks with source + persona metadata for the sources panel */
@@ -166,8 +174,28 @@ export class ChatService {
     )
 
     const embedding = await this.embedQuery(userMessage)
-    const chunks = await this.retrieveChunks(session.persona_ids, embedding, userMessage)
+    const chunks = await this.retrieveChunks(session.persona_ids, embedding, userMessage, session.source_ids)
     const enrichedSources = await this.enrichChunks(chunks)
+
+    // Load persona profiles to inject into system prompt
+    const { rows: personaRows } = await this.pool.query(
+      `SELECT name, persona_profile FROM personas WHERE id = ANY($1) AND persona_profile IS NOT NULL AND persona_profile != '{}'::jsonb`,
+      [session.persona_ids],
+    )
+
+    const personaIdentityBlock = personaRows.length > 0
+      ? personaRows.map((p: { name: string; persona_profile: any }) => {
+          const profile = p.persona_profile
+          const lines = [`Persona: ${p.name}`]
+          if (profile.tone) lines.push(`Tone: ${profile.tone}`)
+          if (profile.speaking_style) lines.push(`Speaking Style: ${profile.speaking_style}`)
+          if (Array.isArray(profile.key_opinions) && profile.key_opinions.length)
+            lines.push(`Key Opinions: ${profile.key_opinions.slice(0, 3).join('; ')}`)
+          if (Array.isArray(profile.catchphrases) && profile.catchphrases.length)
+            lines.push(`Catchphrases: ${profile.catchphrases.slice(0, 4).join(', ')}`)
+          return lines.join('\n')
+        }).join('\n\n')
+      : null
 
     const contextBlock = chunks
       .map((c, i) =>
@@ -175,23 +203,34 @@ export class ChatService {
       )
       .join('\n\n---\n\n')
 
-    const systemPrompt = `You are an AI assistant with deep knowledge from the following sources.
+    const systemPrompt = [
+      `You are an AI assistant with deep knowledge from the following persona(s).`,
+      personaIdentityBlock
+        ? `\nPersona Identity:\n${personaIdentityBlock}\n\nEmbody this persona's voice, tone, and perspective when responding.`
+        : '',
+      `\n${MODE_INSTRUCTIONS[mode]}`,
+      `\nUse [1], [2], etc. to cite sources inline when drawing from the knowledge below.`,
+      `\nRelevant knowledge:\n${contextBlock || 'No relevant knowledge found in the database yet.'}`,
+    ].join('')
 
-${MODE_INSTRUCTIONS[mode]}
-
-Use [1], [2], etc. to cite sources inline when drawing from the knowledge below.
-
-Relevant knowledge:
-${contextBlock || 'No relevant knowledge found in the database yet.'}`
+    const priorMessages = await this.getMessages(sessionId)
+    const historyMessages = priorMessages
+      .slice(-20)
+      .map((m: { role: string; content: string }) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }))
 
     let fullContent = ''
 
+    const model = this.settingsService.get('chat_model')
     const stream = await this.openrouter.chat.completions.create({
-      model: 'anthropic/claude-sonnet-4-6',
+      model,
       max_tokens: 2048,
       stream: true,
       messages: [
         { role: 'system', content: systemPrompt },
+        ...historyMessages,
         { role: 'user', content: userMessage },
       ],
     })

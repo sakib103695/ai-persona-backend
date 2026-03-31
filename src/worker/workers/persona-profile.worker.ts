@@ -18,12 +18,13 @@ export const personaProfileWorker = new Worker(
     const { persona_id } = job.data
     console.log(`[persona-profile] building profile for ${persona_id}`)
 
-    const { rows } = await pool.query<{ topic_summary: string; persona_name: string }>(
-      `SELECT kc.topic_summary, p.name AS persona_name
+    const { rows } = await pool.query<{ topic_summary: string; persona_name: string; chunk_sample: string }>(
+      `SELECT kc.topic_summary, p.name AS persona_name, LEFT(kc.chunk_text, 200) AS chunk_sample
        FROM knowledge_chunks kc
        JOIN personas p ON p.id = kc.persona_id
        WHERE kc.persona_id = $1 AND kc.topic_summary IS NOT NULL
-       LIMIT 200`,
+       ORDER BY RANDOM()
+       LIMIT 500`,
       [persona_id],
     )
 
@@ -31,17 +32,24 @@ export const personaProfileWorker = new Worker(
 
     const personaName = rows[0].persona_name
     const summaries = rows.map((r) => r.topic_summary).join('\n')
+    const samples = rows
+      .slice(0, 20)
+      .map((r, i) => `[${i + 1}] ${r.chunk_sample}`)
+      .join('\n\n')
 
     const response = await openrouter.chat.completions.create({
-      model: 'anthropic/claude-haiku-4-5-20251001',
+      model: 'anthropic/claude-haiku-4-5',
       max_tokens: 1024,
       messages: [
         {
           role: 'user',
-          content: `Based on these topic summaries from ${personaName}'s content, generate a persona profile.
+          content: `Based on these topic summaries and content samples from ${personaName}'s content, generate a persona profile.
 
-Topics covered:
+Topics covered (${rows.length} topics):
 ${summaries}
+
+Content samples:
+${samples}
 
 Return a JSON object with:
 - "tone": describing communication style (e.g. "direct, data-driven, no-fluff")
@@ -61,7 +69,7 @@ Return ONLY valid JSON.`,
     let tags: string[] = []
 
     try {
-      const raw = response.choices[0].message.content ?? ''
+      const raw = (response.choices[0].message.content ?? '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
       profile = JSON.parse(raw)
       tags = (profile as any).tags || []
     } catch {

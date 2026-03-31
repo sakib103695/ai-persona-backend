@@ -109,7 +109,8 @@ export class SourcesService {
            COUNT(*)                                                        AS total,
            COUNT(*) FILTER (WHERE status IN ('done', 'embedded'))         AS done,
            COUNT(*) FILTER (WHERE status = 'failed')                      AS failed,
-           COUNT(*) FILTER (WHERE status IN ('processing','queued','transcribed')) AS processing
+           COUNT(*) FILTER (WHERE status IN ('processing','queued','transcribed')) AS processing,
+           COUNT(*) FILTER (WHERE status = 'listed')                      AS listed
          FROM sources WHERE persona_id = $1`,
         [personaId],
       ),
@@ -133,6 +134,7 @@ export class SourcesService {
         done:       Number(counts.done),
         failed:     Number(counts.failed),
         processing: Number(counts.processing),
+        listed:     Number(counts.listed),
       },
     }
   }

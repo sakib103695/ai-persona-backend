@@ -20,6 +20,10 @@ export const channelScrapeWorker = new Worker(
     )
     const videoLimit = parseInt(settingRows[0]?.value ?? '0', 10)
 
+    // Fetch ALL videos from the channel (just IDs + titles — fast)
+    const allVideos = await getChannelVideoIds(url)
+    console.log(`[channel-scrape] Found ${allVideos.length} videos on channel`)
+
     // Find which video IDs already exist for this persona
     const { rows: existingRows } = await pool.query<{ video_id: string }>(
       `SELECT video_id FROM sources WHERE persona_id = $1`,
@@ -27,59 +31,63 @@ export const channelScrapeWorker = new Worker(
     )
     const existingVideoIds = new Set(existingRows.map((r) => r.video_id))
 
-    // Fetch more videos than the limit so we can skip existing ones
-    // If limit is 10 and 10 already exist, we need to fetch at least 20 to find 10 new ones
-    const fetchLimit = videoLimit > 0 ? videoLimit + existingVideoIds.size : 0
-    const allVideos = await getChannelVideoIds(url, fetchLimit)
-
-    // Filter out already-imported videos, then apply the limit
-    let newVideos = allVideos.filter((v) => !existingVideoIds.has(v.id))
-    if (videoLimit > 0 && newVideos.length > videoLimit) {
-      newVideos = newVideos.slice(0, videoLimit)
-    }
-    console.log(`[channel-scrape] Found ${allVideos.length} total, ${existingVideoIds.size} already exist, ${newVideos.length} new${videoLimit > 0 ? ` (limit: ${videoLimit})` : ''}`)
-
-    // Step 1: Insert new source records
-    const insertedIds: { id: string; video_id: string }[] = []
-    for (const video of newVideos) {
-      const { rows } = await pool.query<{ id: string }>(
+    // Insert ALL videos as sources (so full list is visible in UI)
+    // New ones get status 'listed', existing ones are skipped
+    let totalInserted = 0
+    for (const video of allVideos) {
+      const { rowCount } = await pool.query(
         `INSERT INTO sources (persona_id, video_id, title, channel_url, status)
-         VALUES ($1, $2, $3, $4, 'queued')
-         ON CONFLICT (persona_id, video_id) DO NOTHING
-         RETURNING id`,
+         VALUES ($1, $2, $3, $4, 'listed')
+         ON CONFLICT (persona_id, video_id) DO NOTHING`,
         [persona_id, video.id, video.title, url],
       )
-      if (rows[0]) {
-        insertedIds.push({ id: rows[0].id, video_id: video.id })
-      }
+      if (rowCount && rowCount > 0) totalInserted++
     }
+    console.log(`[channel-scrape] Inserted ${totalInserted} new sources (${existingVideoIds.size} already existed)`)
 
-    console.log(`[channel-scrape] Inserted ${insertedIds.length} new sources`)
+    // Pick the latest N unfetched videos to actually process
+    // "unfetched" = status is 'listed' (just catalogued, never processed)
+    const { rows: toProcess } = await pool.query<{ id: string; video_id: string }>(
+      `SELECT id, video_id FROM sources
+       WHERE persona_id = $1 AND status = 'listed'
+       ORDER BY created_at ASC
+       ${videoLimit > 0 ? `LIMIT ${videoLimit}` : ''}`,
+      [persona_id],
+    )
 
-    // Update persona status
-    if (insertedIds.length > 0) {
+    if (toProcess.length > 0) {
+      // Mark them as queued
+      const queueIds = toProcess.map((r) => r.id)
+      await pool.query(
+        `UPDATE sources SET status = 'queued', updated_at = NOW() WHERE id = ANY($1)`,
+        [queueIds],
+      )
+
       await pool.query(
         `UPDATE personas SET status = 'processing', updated_at = NOW() WHERE id = $1`,
         [persona_id],
       )
+
+      // Queue transcript jobs
+      for (const { id, video_id } of toProcess) {
+        await videoTranscriptQueue.add(
+          'transcript',
+          { source_id: id, video_id, persona_id },
+          { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+        )
+      }
+
+      console.log(`[channel-scrape] Queued ${toProcess.length} videos for processing`)
     } else {
-      // No new videos — set back to ready (don't leave stuck in pending/processing)
+      // No new videos to process — set back to ready
       await pool.query(
         `UPDATE personas SET status = 'ready', updated_at = NOW() WHERE id = $1`,
         [persona_id],
       )
+      console.log(`[channel-scrape] No new videos to process`)
     }
 
-    // Step 2: Queue transcript jobs for all new sources
-    for (const { id, video_id } of insertedIds) {
-      await videoTranscriptQueue.add(
-        'transcript',
-        { source_id: id, video_id, persona_id },
-        { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
-      )
-    }
-
-    return { videos_found: videos.length, videos_queued: insertedIds.length }
+    return { videos_found: allVideos.length, new_sources: totalInserted, queued: toProcess.length }
   },
   { connection, concurrency: 1 },
 )

@@ -217,10 +217,35 @@ export interface VideoMeta {
   title: string
 }
 
+export interface ChannelResult {
+  videos: VideoMeta[]
+  avatar_url: string | null
+}
+
+function extractAvatarUrl(data: any): string | null {
+  // Channel avatar is in header: c4TabbedHeaderRenderer or pageHeaderRenderer
+  try {
+    const header =
+      data?.header?.c4TabbedHeaderRenderer ||
+      data?.header?.pageHeaderRenderer
+    const thumbs =
+      header?.avatar?.thumbnails ||
+      header?.content?.pageHeaderViewModel?.image?.decoratedAvatarViewModel?.avatar?.avatarViewModel?.image?.sources
+    if (thumbs?.length) {
+      // Pick the largest thumbnail
+      const sorted = [...thumbs].sort((a: any, b: any) => (b.width || 0) - (a.width || 0))
+      const url: string = sorted[0].url
+      // Strip size params to get full resolution
+      return url.replace(/=s\d+.*$/, '=s800-c-k-c0x00ffffff-no-rj')
+    }
+  } catch {}
+  return null
+}
+
 export async function getChannelVideoIds(
   channelUrl: string,
   limit = 0,
-): Promise<VideoMeta[]> {
+): Promise<ChannelResult> {
   let url = channelUrl.replace(/\/$/, '')
   if (!url.includes('/videos')) url += '/videos'
 
@@ -230,6 +255,8 @@ export async function getChannelVideoIds(
   const html = await res.text()
   const data = extractJson(html, 'ytInitialData')
   if (!data) throw new Error('Could not extract ytInitialData')
+
+  const avatar_url = extractAvatarUrl(data)
 
   const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)
   const apiKey =
@@ -312,7 +339,7 @@ export async function getChannelVideoIds(
   const filtered = videoIds.filter(
     (v) => v.id.length === 11 && /^[a-zA-Z0-9_-]+$/.test(v.id),
   )
-  return limit > 0 ? filtered.slice(0, limit) : filtered
+  return { videos: limit > 0 ? filtered.slice(0, limit) : filtered, avatar_url }
 }
 
 /* ── Transcript extraction ─────────────────────────────────────────────────── */

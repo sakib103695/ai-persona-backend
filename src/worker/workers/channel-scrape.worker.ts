@@ -21,8 +21,17 @@ export const channelScrapeWorker = new Worker(
     const videoLimit = parseInt(settingRows[0]?.value ?? '0', 10)
 
     // Fetch ALL videos from the channel (just IDs + titles — fast)
-    const allVideos = await getChannelVideoIds(url)
+    const { videos: allVideos, avatar_url } = await getChannelVideoIds(url)
     console.log(`[channel-scrape] Found ${allVideos.length} videos on channel`)
+
+    // Save avatar if found and persona doesn't have one yet
+    if (avatar_url) {
+      await pool.query(
+        `UPDATE personas SET avatar_url = $1, updated_at = NOW() WHERE id = $2 AND (avatar_url IS NULL OR avatar_url = '')`,
+        [avatar_url, persona_id],
+      )
+      console.log(`[channel-scrape] Avatar saved`)
+    }
 
     // Find which video IDs already exist for this persona
     const { rows: existingRows } = await pool.query<{ video_id: string }>(

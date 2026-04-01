@@ -93,10 +93,13 @@ export class PersonasService {
     return { deleted: true }
   }
 
-  /** Export all personas with sources and chunks as JSON */
-  async exportAll() {
+  /** Export all (or selected) personas with sources and chunks as JSON */
+  async exportAll(ids?: string[]) {
     const { rows: personas } = await this.pool.query(
-      `SELECT * FROM personas ORDER BY created_at DESC`,
+      ids?.length
+        ? `SELECT * FROM personas WHERE id = ANY($1) ORDER BY created_at DESC`
+        : `SELECT * FROM personas ORDER BY created_at DESC`,
+      ids?.length ? [ids] : [],
     )
 
     const result = []

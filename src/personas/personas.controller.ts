@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Res } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Delete, Param, Body, Res, Query } from '@nestjs/common'
 import { Response } from 'express'
 import { PersonasService } from './personas.service'
 
@@ -12,8 +12,9 @@ export class PersonasController {
   }
 
   @Get('export')
-  async exportAll(@Res() res: Response) {
-    const data = await this.personas.exportAll()
+  async exportAll(@Res() res: Response, @Query('ids') ids?: string) {
+    const idList = ids ? ids.split(',').filter(Boolean) : undefined
+    const data = await this.personas.exportAll(idList)
     const json = JSON.stringify(data, null, 2)
     res.setHeader('Content-Type', 'application/json')
     res.setHeader('Content-Disposition', `attachment; filename="persona-export-${Date.now()}.json"`)

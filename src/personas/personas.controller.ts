@@ -1,4 +1,5 @@
-import { Controller, Get, Patch, Delete, Param, Body } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Delete, Param, Body, Res } from '@nestjs/common'
+import { Response } from 'express'
 import { PersonasService } from './personas.service'
 
 @Controller('personas')
@@ -8,6 +9,20 @@ export class PersonasController {
   @Get()
   findAll() {
     return this.personas.findAll()
+  }
+
+  @Get('export')
+  async exportAll(@Res() res: Response) {
+    const data = await this.personas.exportAll()
+    const json = JSON.stringify(data, null, 2)
+    res.setHeader('Content-Type', 'application/json')
+    res.setHeader('Content-Disposition', `attachment; filename="persona-export-${Date.now()}.json"`)
+    res.send(json)
+  }
+
+  @Post('import')
+  async importAll(@Body() body: any[]) {
+    return this.personas.importAll(body)
   }
 
   @Get(':id')

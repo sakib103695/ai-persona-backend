@@ -11,6 +11,7 @@ console.log('  ✓ channel-scrape')
 console.log('  ✓ video-transcript')
 console.log('  ✓ chunk-and-embed')
 console.log('  ✓ persona-profile')
+console.log(`  YouTube auth: ${process.env.YT_COOKIES ? '✅ cookies configured' : '⚠️  no YT_COOKIES — may be blocked on datacenter IPs'}`)
 
 process.on('SIGTERM', async () => {
   console.log('Shutting down workers...')

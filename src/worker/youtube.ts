@@ -1,7 +1,10 @@
 /**
  * YouTube transcript extraction — uses innertube API + watch page scraping.
- * Supports proxy via YT_PROXY_URL environment variable (needed for datacenter IPs).
+ * Supports:
+ *   - YT_COOKIES env var: browser cookies for authenticated requests (bypasses bot detection)
+ *   - YT_PROXY_URL env var: proxy for datacenter IPs
  */
+import { createHash } from 'crypto'
 
 /* ── Proxy support ─────────────────────────────────────────────────────────── */
 
@@ -14,7 +17,6 @@ function getProxyAgent() {
   const url = process.env.YT_PROXY_URL
   if (!url) return null
   try {
-    // undici is built into Node.js 18+ (ships with the runtime)
     const { ProxyAgent } = require('undici')
     _proxyAgent = new ProxyAgent(url)
     console.log(`[youtube] Using proxy: ${url.replace(/\/\/([^@]+)@/, '//***@')}`)
@@ -31,18 +33,63 @@ async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Respo
   return fetch(url, opts)
 }
 
+/* ── Cookie auth ───────────────────────────────────────────────────────────── */
+
+function getYtCookies(): string {
+  const cookies = process.env.YT_COOKIES || ''
+  if (cookies) return cookies
+  return 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2NjU5MjUyNjkaBgiArKu1Bg'
+}
+
+function extractCookieValue(name: string): string | null {
+  const cookies = getYtCookies()
+  const match = cookies.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))
+  return match ? match[1] : null
+}
+
+/**
+ * Generate SAPISIDHASH for authenticated YouTube API requests.
+ * Required when using logged-in cookies with innertube API.
+ */
+function getSapisidHash(origin = 'https://www.youtube.com'): string | null {
+  const sapisid = extractCookieValue('SAPISID') || extractCookieValue('__Secure-3PAPISID')
+  if (!sapisid) return null
+  const timestamp = Math.floor(Date.now() / 1000)
+  const input = `${timestamp} ${sapisid} ${origin}`
+  const hash = createHash('sha1').update(input).digest('hex')
+  return `SAPISIDHASH ${timestamp}_${hash}`
+}
+
+function hasYtCookies(): boolean {
+  return !!process.env.YT_COOKIES
+}
+
 /* ── Constants ─────────────────────────────────────────────────────────────── */
 
-const CONSENT_COOKIES =
-  'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2NjU5MjUyNjkaBgiArKu1Bg'
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
-const BROWSER_HEADERS: Record<string, string> = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Accept-Language': 'en-US,en;q=0.9',
-  Accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  Cookie: CONSENT_COOKIES,
+function getBrowserHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': BROWSER_UA,
+    'Accept-Language': 'en-US,en;q=0.9',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    Cookie: getYtCookies(),
+  }
+  const sapisid = getSapisidHash()
+  if (sapisid) {
+    headers['Authorization'] = sapisid
+    headers['X-Origin'] = 'https://www.youtube.com'
+  }
+  return headers
+}
+
+function getApiHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...getBrowserHeaders(),
+  }
+  return headers
 }
 
 const ANDROID_UA = 'com.google.android.youtube/19.29.37 (Linux; U; Android 14)'
@@ -146,8 +193,8 @@ async function fetchCaptionText(
   ua?: string,
 ): Promise<TranscriptResult | null> {
   const headers: Record<string, string> = {
-    'User-Agent': ua || BROWSER_HEADERS['User-Agent'],
-    Cookie: CONSENT_COOKIES,
+    'User-Agent': ua || BROWSER_UA,
+    Cookie: getYtCookies(),
   }
   const captionRes = await ytFetch(track.baseUrl, { headers })
   if (!captionRes.ok) return null
@@ -177,7 +224,7 @@ export async function getChannelVideoIds(
   let url = channelUrl.replace(/\/$/, '')
   if (!url.includes('/videos')) url += '/videos'
 
-  const res = await ytFetch(url, { headers: BROWSER_HEADERS })
+  const res = await ytFetch(url, { headers: getBrowserHeaders() })
   if (!res.ok) throw new Error(`Failed to fetch channel: ${res.status}`)
 
   const html = await res.text()
@@ -233,7 +280,7 @@ export async function getChannelVideoIds(
       `https://www.youtube.com/youtubei/v1/browse?key=${apiKey}&prettyPrint=false`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...BROWSER_HEADERS },
+        headers: getApiHeaders(),
         body: JSON.stringify({
           context: {
             client: {
@@ -334,30 +381,28 @@ async function tryInnertubePlayer(
 export async function getVideoTranscript(
   videoId: string,
 ): Promise<TranscriptResult> {
+  const authed = hasYtCookies()
+  if (!authed) {
+    console.log(`[transcript] ⚠️  No YT_COOKIES set — requests will likely be blocked on datacenter IPs`)
+  }
+
   // ── Method 1: Scrape watch page ──────────────────────────────────────────
-  // This is the most reliable method — it gets the full page with embedded
-  // player data, and the consent cookies help bypass EU consent screens.
   try {
     const watchRes = await ytFetch(
       `https://www.youtube.com/watch?v=${videoId}`,
-      { headers: BROWSER_HEADERS },
+      { headers: getBrowserHeaders() },
     )
     if (watchRes.ok) {
       const html = await watchRes.text()
 
-      // Extract session data for later API calls
-      const visitorData =
-        html.match(/"visitorData":"([^"]+)"/)?.[1] || ''
-      const pageApiKey =
-        html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1] || ''
+      const visitorData = html.match(/"visitorData":"([^"]+)"/)?.[1] || ''
+      const pageApiKey = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1] || ''
       const pageClientVersion =
         html.match(/"clientVersion":"([^"]+)"/)?.[1] || '2.20260101.00.00'
 
-      // Try getting captions from inline player data
       const playerData = extractJson(html, 'ytInitialPlayerResponse')
       if (playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-        const captions =
-          playerData.captions.playerCaptionsTracklistRenderer.captionTracks
+        const captions = playerData.captions.playerCaptionsTracklistRenderer.captionTracks
         const track = selectBestTrack(captions)
         const result = await fetchCaptionText(track)
         if (result) {
@@ -366,13 +411,14 @@ export async function getVideoTranscript(
         }
       } else {
         const playability = playerData?.playabilityStatus?.status
-        console.log(
-          `[transcript] Watch page: no inline captions (playability=${playability || 'missing'})`,
-        )
+        console.log(`[transcript] Watch page: no inline captions (playability=${playability || 'missing'})`)
       }
 
-      // Try innertube API with session data from the page (visitorData helps)
+      // Try innertube with session context from the page
       if (visitorData || pageApiKey) {
+        const sessionHeaders = getApiHeaders()
+        if (visitorData) sessionHeaders['X-Goog-Visitor-Id'] = visitorData
+
         const sessionResult = await tryInnertubePlayer(videoId, {
           label: 'WEB+session',
           context: {
@@ -384,30 +430,18 @@ export async function getVideoTranscript(
               visitorData,
             },
           },
-          headers: {
-            'Content-Type': 'application/json',
-            ...BROWSER_HEADERS,
-            ...(visitorData
-              ? { 'X-Goog-Visitor-Id': visitorData }
-              : {}),
-          },
+          headers: sessionHeaders,
         })
         if (sessionResult) {
-          console.log(
-            `[transcript] ✅ ${videoId} via WEB+session innertube`,
-          )
+          console.log(`[transcript] ✅ ${videoId} via WEB+session innertube`)
           return sessionResult
         }
       }
     } else {
-      console.log(
-        `[transcript] Watch page: HTTP ${watchRes.status}`,
-      )
+      console.log(`[transcript] Watch page: HTTP ${watchRes.status}`)
     }
   } catch (e: any) {
-    console.log(
-      `[transcript] Watch page method failed for ${videoId}: ${e.message}`,
-    )
+    console.log(`[transcript] Watch page failed for ${videoId}: ${e.message}`)
   }
 
   // ── Method 2: WEB innertube (stateless) ──────────────────────────────────
@@ -415,26 +449,16 @@ export async function getVideoTranscript(
     const result = await tryInnertubePlayer(videoId, {
       label: 'WEB',
       context: {
-        client: {
-          clientName: 'WEB',
-          clientVersion: '2.20260101.00.00',
-          hl: 'en',
-          gl: 'US',
-        },
+        client: { clientName: 'WEB', clientVersion: '2.20260101.00.00', hl: 'en', gl: 'US' },
       },
-      headers: {
-        'Content-Type': 'application/json',
-        ...BROWSER_HEADERS,
-      },
+      headers: getApiHeaders(),
     })
     if (result) {
       console.log(`[transcript] ✅ ${videoId} via WEB innertube`)
       return result
     }
   } catch (e: any) {
-    console.log(
-      `[transcript] WEB innertube failed for ${videoId}: ${e.message}`,
-    )
+    console.log(`[transcript] WEB innertube failed for ${videoId}: ${e.message}`)
   }
 
   // ── Method 3: ANDROID innertube ──────────────────────────────────────────
@@ -445,7 +469,7 @@ export async function getVideoTranscript(
       headers: {
         'Content-Type': 'application/json',
         'User-Agent': ANDROID_UA,
-        Cookie: CONSENT_COOKIES,
+        Cookie: getYtCookies(),
       },
     })
     if (result) {
@@ -453,38 +477,7 @@ export async function getVideoTranscript(
       return result
     }
   } catch (e: any) {
-    console.log(
-      `[transcript] ANDROID innertube failed for ${videoId}: ${e.message}`,
-    )
-  }
-
-  // ── Method 4: Embedded player client ─────────────────────────────────────
-  // TVHTML5_SIMPLY_EMBEDDED_PLAYER sometimes bypasses datacenter IP blocks
-  try {
-    const result = await tryInnertubePlayer(videoId, {
-      label: 'TVHTML5_EMBEDDED',
-      context: {
-        client: {
-          clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
-          clientVersion: '2.0',
-        },
-        thirdParty: { embedUrl: 'https://www.youtube.com' },
-      },
-      headers: {
-        'Content-Type': 'application/json',
-        ...BROWSER_HEADERS,
-      },
-    })
-    if (result) {
-      console.log(
-        `[transcript] ✅ ${videoId} via TVHTML5_EMBEDDED innertube`,
-      )
-      return result
-    }
-  } catch (e: any) {
-    console.log(
-      `[transcript] TVHTML5_EMBEDDED failed for ${videoId}: ${e.message}`,
-    )
+    console.log(`[transcript] ANDROID innertube failed for ${videoId}: ${e.message}`)
   }
 
   return { error: 'Video not playable: all transcript methods failed' }

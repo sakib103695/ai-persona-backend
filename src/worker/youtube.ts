@@ -374,7 +374,7 @@ async function tryInnertubePlayer(
 
   const track = selectBestTrack(captions)
   const ua =
-    clientConfig.headers['User-Agent'] || BROWSER_HEADERS['User-Agent']
+    clientConfig.headers['User-Agent'] || BROWSER_UA
   return fetchCaptionText(track, ua)
 }
 

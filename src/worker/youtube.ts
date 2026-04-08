@@ -75,9 +75,11 @@ async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Respo
 /* ── Cookie auth ───────────────────────────────────────────────────────────── */
 
 function getYtCookies(): string {
-  const cookies = process.env.YT_COOKIES || ''
-  if (cookies) return cookies
-  return 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2NjU5MjUyNjkaBgiArKu1Bg'
+  // IMPORTANT: do NOT return a default "CONSENT=PENDING" cookie. That tells
+  // YouTube the user hasn't accepted the consent banner yet, which forces a
+  // consent-flow redirect and triggers LOGIN_REQUIRED bot challenges. Sending
+  // no cookies at all is treated as a clean anonymous visitor and works fine.
+  return process.env.YT_COOKIES || ''
 }
 
 function extractCookieValue(name: string): string | null {
@@ -99,10 +101,6 @@ function getSapisidHash(origin = 'https://www.youtube.com'): string | null {
   return `SAPISIDHASH ${timestamp}_${hash}`
 }
 
-function hasYtCookies(): boolean {
-  return !!process.env.YT_COOKIES
-}
-
 /* ── Constants ─────────────────────────────────────────────────────────────── */
 
 const BROWSER_UA =
@@ -113,8 +111,9 @@ function getBrowserHeaders(): Record<string, string> {
     'User-Agent': BROWSER_UA,
     'Accept-Language': 'en-US,en;q=0.9',
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    Cookie: getYtCookies(),
   }
+  const cookies = getYtCookies()
+  if (cookies) headers.Cookie = cookies
   const sapisid = getSapisidHash()
   if (sapisid) {
     headers['Authorization'] = sapisid
@@ -233,8 +232,9 @@ async function fetchCaptionText(
 ): Promise<TranscriptResult | null> {
   const headers: Record<string, string> = {
     'User-Agent': ua || BROWSER_UA,
-    Cookie: getYtCookies(),
   }
+  const cookies = getYtCookies()
+  if (cookies) headers.Cookie = cookies
   const captionRes = await ytFetch(track.baseUrl, { headers })
   if (!captionRes.ok) return null
 
@@ -447,10 +447,8 @@ async function tryInnertubePlayer(
 export async function getVideoTranscript(
   videoId: string,
 ): Promise<TranscriptResult> {
-  const authed = hasYtCookies()
-  if (!authed) {
-    console.log(`[transcript] ⚠️  No YT_COOKIES set — requests will likely be blocked on datacenter IPs`)
-  }
+  // Cookies are optional. With a clean residential proxy, no cookies works
+  // best (sending the default consent cookie triggers LOGIN_REQUIRED).
 
   // ── Method 1: Scrape watch page ──────────────────────────────────────────
   try {

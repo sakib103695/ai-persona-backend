@@ -56,6 +56,17 @@ function initProxyPool() {
     return
   }
 
+  // Toggle to bypass the proxy without removing YT_PROXY_URLS from .env.
+  // Useful for testing whether direct connections work (yt-dlp's Android VR
+  // path often succeeds from datacenter IPs that the WEB endpoint blocks).
+  const disabled = ['1', 'true', 'yes'].includes(
+    (process.env.YT_DISABLE_PROXY || '').toLowerCase(),
+  )
+  if (disabled) {
+    console.log(`[youtube] YT_DISABLE_PROXY set — using direct connections`)
+    return
+  }
+
   const urls = (process.env.YT_PROXY_URLS || process.env.YT_PROXY_URL || '')
     .split(',')
     .map((s) => s.trim())

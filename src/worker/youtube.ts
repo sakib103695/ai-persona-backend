@@ -2,34 +2,60 @@
  * YouTube transcript extraction — uses innertube API + watch page scraping.
  * Supports:
  *   - YT_COOKIES env var: browser cookies for authenticated requests (bypasses bot detection)
- *   - YT_PROXY_URL env var: proxy for datacenter IPs
+ *   - YT_PROXY_URL env var: single proxy URL (legacy)
+ *   - YT_PROXY_URLS env var: comma-separated proxy pool, rotated round-robin per request
  */
 import { createHash } from 'crypto'
 
-/* ── Proxy support ─────────────────────────────────────────────────────────── */
+/* ── Proxy pool with round-robin rotation ──────────────────────────────────── */
 
-let _proxyAgent: any = null
+let _proxyAgents: any[] = []
+let _proxyLabels: string[] = []
 let _proxyInited = false
+let _proxyCursor = 0
 
-function getProxyAgent() {
-  if (_proxyInited) return _proxyAgent
+function initProxyPool() {
+  if (_proxyInited) return
   _proxyInited = true
-  const url = process.env.YT_PROXY_URL
-  if (!url) return null
+
+  const pool = (process.env.YT_PROXY_URLS || process.env.YT_PROXY_URL || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  if (pool.length === 0) return
+
+  let ProxyAgent: any
   try {
-    const { ProxyAgent } = require('undici')
-    _proxyAgent = new ProxyAgent(url)
-    console.log(`[youtube] Using proxy: ${url.replace(/\/\/([^@]+)@/, '//***@')}`)
+    ProxyAgent = require('undici').ProxyAgent
   } catch (e) {
-    console.error(`[youtube] Failed to create proxy agent:`, e)
+    console.error(`[youtube] Failed to load undici ProxyAgent:`, e)
+    return
   }
-  return _proxyAgent
+
+  for (const url of pool) {
+    try {
+      _proxyAgents.push(new ProxyAgent(url))
+      _proxyLabels.push(url.replace(/\/\/([^@]+)@/, '//***@'))
+    } catch (e) {
+      console.error(`[youtube] Failed to create proxy agent for ${url}:`, e)
+    }
+  }
+
+  console.log(`[youtube] Proxy pool initialized with ${_proxyAgents.length} proxies`)
+}
+
+function nextProxyAgent(): { agent: any; label: string } | null {
+  initProxyPool()
+  if (_proxyAgents.length === 0) return null
+  const i = _proxyCursor++ % _proxyAgents.length
+  return { agent: _proxyAgents[i], label: _proxyLabels[i] }
 }
 
 async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
-  const agent = getProxyAgent()
+  const picked = nextProxyAgent()
   const opts: any = { ...init }
-  if (agent) opts.dispatcher = agent
+  if (picked) opts.dispatcher = picked.agent
   return fetch(url, opts)
 }
 

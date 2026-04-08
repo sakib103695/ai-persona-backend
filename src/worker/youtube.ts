@@ -36,6 +36,7 @@ interface ProxyEntry {
   agent: any
   url: string // raw URL with credentials, used by yt-dlp
   label: string // masked URL for logging
+  exhausted: boolean // marked true after a TRAFFIC_EXHAUSTED / 407 response
 }
 
 let _undiciFetch: typeof fetch | null = null
@@ -83,6 +84,7 @@ function initProxyPool() {
         agent: new undici.ProxyAgent(url),
         url,
         label: url.replace(/\/\/([^@]+)@/, '//***@'),
+        exhausted: false,
       })
     } catch (e) {
       console.error(`[youtube] Failed to create proxy agent for ${url}:`, e)
@@ -95,8 +97,24 @@ function initProxyPool() {
 function nextProxy(): ProxyEntry | null {
   initProxyPool()
   if (_proxyPool.length === 0) return null
-  const i = _proxyCursor++ % _proxyPool.length
-  return _proxyPool[i]
+
+  // Skip exhausted proxies. Try at most pool.length entries before giving up.
+  for (let attempts = 0; attempts < _proxyPool.length; attempts++) {
+    const entry = _proxyPool[_proxyCursor++ % _proxyPool.length]
+    if (!entry.exhausted) return entry
+  }
+
+  console.log(`[youtube] All ${_proxyPool.length} proxies exhausted — using direct connection`)
+  return null
+}
+
+function markProxyExhausted(entry: ProxyEntry) {
+  if (entry.exhausted) return
+  entry.exhausted = true
+  const remaining = _proxyPool.filter((p) => !p.exhausted).length
+  console.log(
+    `[youtube] Proxy ${entry.label} marked exhausted (${remaining}/${_proxyPool.length} remaining)`,
+  )
 }
 
 async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
@@ -541,10 +559,15 @@ async function getTranscriptViaYtDlp(
       `https://www.youtube.com/watch?v=${videoId}`,
     )
 
-    await execFileP('yt-dlp', args, {
+    const { stderr } = await execFileP('yt-dlp', args, {
       timeout: 90_000,
       maxBuffer: 4 * 1024 * 1024,
     })
+
+    // yt-dlp may "succeed" overall but still log proxy exhaustion in stderr.
+    if (proxy && /TRAFFIC_EXHAUSTED|407/.test(stderr || '')) {
+      markProxyExhausted(proxy)
+    }
 
     // yt-dlp writes <id>.<lang>.vtt — find whichever language landed
     const fs = await import('fs/promises')
@@ -570,8 +593,11 @@ async function getTranscriptViaYtDlp(
       type: 'auto-generated',
     }
   } catch (e: any) {
-    const msg = (e?.stderr || e?.message || '').toString().slice(0, 300)
-    console.log(`[transcript] yt-dlp ${videoId} failed: ${msg}`)
+    const fullMsg = (e?.stderr || e?.message || '').toString()
+    if (proxy && /TRAFFIC_EXHAUSTED|407/.test(fullMsg)) {
+      markProxyExhausted(proxy)
+    }
+    console.log(`[transcript] yt-dlp ${videoId} failed: ${fullMsg.slice(0, 300)}`)
     return null
   } finally {
     if (workDir) {

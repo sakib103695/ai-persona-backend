@@ -552,6 +552,12 @@ async function getTranscriptViaYtDlp(
       '--write-sub',
       '--sub-lang', 'en.*,en',
       '--sub-format', 'vtt',
+      // Force Android VR client only — skips the ~1.5MB WEB watch page
+      // download. The Android VR API gives us captions directly with much
+      // less bandwidth, and is the path that's not blocked by YouTube's bot
+      // detection in 2026 anyway. If yt-dlp ever needs to fall back to other
+      // clients (e.g., Android VR gets locked down), remove this flag.
+      '--extractor-args', 'youtube:player_client=android_vr',
       '--no-warnings',
       '--no-playlist',
       '--no-progress',

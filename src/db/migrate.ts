@@ -113,6 +113,14 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources (status);
 CREATE INDEX IF NOT EXISTS idx_sources_persona ON sources (persona_id);
 CREATE INDEX IF NOT EXISTS idx_personas_tags ON personas USING gin (tags);
 
+-- Cache lookups: when a video is imported across multiple personas, we
+-- copy the existing transcript instead of re-fetching from YouTube. This
+-- partial index keeps the lookup cheap by only indexing rows that have a
+-- transcript available to copy.
+CREATE INDEX IF NOT EXISTS idx_sources_video_id_with_transcript
+  ON sources (video_id)
+  WHERE transcript_text IS NOT NULL;
+
 -- Vector index (created conditionally after data exists)
 DO $$
 BEGIN

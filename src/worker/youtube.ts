@@ -8,7 +8,14 @@
 import { createHash } from 'crypto'
 
 /* ── Proxy pool with round-robin rotation ──────────────────────────────────── */
+//
+// IMPORTANT: we use undici's own `fetch` (not Node's global fetch). Node ships
+// with a built-in copy of undici, but a userland `require('undici')` returns a
+// SEPARATE instance. A ProxyAgent from userland undici is not compatible with
+// the global fetch's dispatcher — you get silent "fetch failed" errors. Using
+// undici's fetch + ProxyAgent from the same module avoids this trap.
 
+let _undiciFetch: typeof fetch | null = null
 let _proxyAgents: any[] = []
 let _proxyLabels: string[] = []
 let _proxyInited = false
@@ -18,24 +25,28 @@ function initProxyPool() {
   if (_proxyInited) return
   _proxyInited = true
 
+  let undici: any
+  try {
+    undici = require('undici')
+    _undiciFetch = undici.fetch
+  } catch (e) {
+    console.error(`[youtube] Failed to load undici:`, e)
+    return
+  }
+
   const pool = (process.env.YT_PROXY_URLS || process.env.YT_PROXY_URL || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
 
-  if (pool.length === 0) return
-
-  let ProxyAgent: any
-  try {
-    ProxyAgent = require('undici').ProxyAgent
-  } catch (e) {
-    console.error(`[youtube] Failed to load undici ProxyAgent:`, e)
+  if (pool.length === 0) {
+    console.log(`[youtube] No proxies configured — using direct connections`)
     return
   }
 
   for (const url of pool) {
     try {
-      _proxyAgents.push(new ProxyAgent(url))
+      _proxyAgents.push(new undici.ProxyAgent(url))
       _proxyLabels.push(url.replace(/\/\/([^@]+)@/, '//***@'))
     } catch (e) {
       console.error(`[youtube] Failed to create proxy agent for ${url}:`, e)
@@ -46,17 +57,19 @@ function initProxyPool() {
 }
 
 function nextProxyAgent(): { agent: any; label: string } | null {
-  initProxyPool()
   if (_proxyAgents.length === 0) return null
   const i = _proxyCursor++ % _proxyAgents.length
   return { agent: _proxyAgents[i], label: _proxyLabels[i] }
 }
 
 async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
+  initProxyPool()
   const picked = nextProxyAgent()
   const opts: any = { ...init }
   if (picked) opts.dispatcher = picked.agent
-  return fetch(url, opts)
+  // Use undici's fetch (not Node global) so the dispatcher is honored
+  const f = _undiciFetch || fetch
+  return f(url, opts) as Promise<Response>
 }
 
 /* ── Cookie auth ───────────────────────────────────────────────────────────── */

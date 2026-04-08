@@ -1,11 +1,28 @@
 /**
- * YouTube transcript extraction — uses innertube API + watch page scraping.
- * Supports:
- *   - YT_COOKIES env var: browser cookies for authenticated requests (bypasses bot detection)
- *   - YT_PROXY_URL env var: single proxy URL (legacy)
- *   - YT_PROXY_URLS env var: comma-separated proxy pool, rotated round-robin per request
+ * YouTube transcript extraction.
+ *
+ * Transcript fetching uses yt-dlp (shelled out via child_process). Direct HTTP
+ * fetching of the captions endpoint is silently blocked by YouTube even from
+ * residential IPs (200 OK with 0-byte body). yt-dlp uses alternate client
+ * identities (Android VR, iOS, etc.) and signature deciphering to work around
+ * this — and it's actively maintained against YouTube's evolving defenses.
+ *
+ * Channel listing still uses our own innertube/HTML scraping because that
+ * endpoint isn't bot-protected.
+ *
+ * Env vars:
+ *   - YT_PROXY_URL: single proxy URL (legacy)
+ *   - YT_PROXY_URLS: comma-separated proxy pool, rotated round-robin
+ *   - YT_COOKIES: browser cookies (optional, generally not needed with proxies)
  */
 import { createHash } from 'crypto'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { mkdtemp, readFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
+
+const execFileP = promisify(execFile)
 
 /* ── Proxy pool with round-robin rotation ──────────────────────────────────── */
 //
@@ -15,9 +32,14 @@ import { createHash } from 'crypto'
 // the global fetch's dispatcher — you get silent "fetch failed" errors. Using
 // undici's fetch + ProxyAgent from the same module avoids this trap.
 
+interface ProxyEntry {
+  agent: any
+  url: string // raw URL with credentials, used by yt-dlp
+  label: string // masked URL for logging
+}
+
 let _undiciFetch: typeof fetch | null = null
-let _proxyAgents: any[] = []
-let _proxyLabels: string[] = []
+let _proxyPool: ProxyEntry[] = []
 let _proxyInited = false
 let _proxyCursor = 0
 
@@ -34,37 +56,40 @@ function initProxyPool() {
     return
   }
 
-  const pool = (process.env.YT_PROXY_URLS || process.env.YT_PROXY_URL || '')
+  const urls = (process.env.YT_PROXY_URLS || process.env.YT_PROXY_URL || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
 
-  if (pool.length === 0) {
+  if (urls.length === 0) {
     console.log(`[youtube] No proxies configured — using direct connections`)
     return
   }
 
-  for (const url of pool) {
+  for (const url of urls) {
     try {
-      _proxyAgents.push(new undici.ProxyAgent(url))
-      _proxyLabels.push(url.replace(/\/\/([^@]+)@/, '//***@'))
+      _proxyPool.push({
+        agent: new undici.ProxyAgent(url),
+        url,
+        label: url.replace(/\/\/([^@]+)@/, '//***@'),
+      })
     } catch (e) {
       console.error(`[youtube] Failed to create proxy agent for ${url}:`, e)
     }
   }
 
-  console.log(`[youtube] Proxy pool initialized with ${_proxyAgents.length} proxies`)
+  console.log(`[youtube] Proxy pool initialized with ${_proxyPool.length} proxies`)
 }
 
-function nextProxyAgent(): { agent: any; label: string } | null {
-  if (_proxyAgents.length === 0) return null
-  const i = _proxyCursor++ % _proxyAgents.length
-  return { agent: _proxyAgents[i], label: _proxyLabels[i] }
+function nextProxy(): ProxyEntry | null {
+  initProxyPool()
+  if (_proxyPool.length === 0) return null
+  const i = _proxyCursor++ % _proxyPool.length
+  return _proxyPool[i]
 }
 
 async function ytFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
-  initProxyPool()
-  const picked = nextProxyAgent()
+  const picked = nextProxy()
   const opts: any = { ...init }
   if (picked) opts.dispatcher = picked.agent
   // Use undici's fetch (not Node global) so the dispatcher is honored
@@ -444,11 +469,123 @@ async function tryInnertubePlayer(
   return fetchCaptionText(track, ua)
 }
 
+/* ── yt-dlp transcript path ────────────────────────────────────────────────── */
+
+/**
+ * Strip VTT formatting and return plain text. Auto-generated captions repeat
+ * each line for the rolling display effect, so we deduplicate consecutive
+ * identical segments.
+ */
+function parseVtt(vtt: string): string {
+  const segments: string[] = []
+  let last = ''
+  for (const raw of vtt.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('WEBVTT')) continue
+    if (line.startsWith('Kind:') || line.startsWith('Language:')) continue
+    if (line.startsWith('NOTE')) continue
+    if (/^\d{2}:\d{2}:\d{2}\.\d{3}\s*-->/.test(line)) continue
+    if (/^\d+$/.test(line)) continue // numeric cue identifiers
+
+    // Strip inline timing tags <00:00:19.039>, color tags <c>...</c>, any other
+    let text = line.replace(/<\d{2}:\d{2}:\d{2}\.\d{3}>/g, '')
+    text = text.replace(/<\/?c[^>]*>/g, '')
+    text = text.replace(/<[^>]+>/g, '')
+    text = decodeEntities(text).trim()
+
+    if (!text || text === last) continue
+    segments.push(text)
+    last = text
+  }
+  return segments.join(' ')
+}
+
+/**
+ * Run yt-dlp to fetch the captions for a video. Uses a proxy from the pool if
+ * one is configured. Returns null on failure (caller falls back to other
+ * methods or marks the video as failed).
+ */
+async function getTranscriptViaYtDlp(
+  videoId: string,
+): Promise<TranscriptResult | null> {
+  const proxy = nextProxy()
+  let workDir: string | null = null
+  try {
+    workDir = await mkdtemp(join(tmpdir(), 'ytdlp-'))
+    const outputTemplate = join(workDir, '%(id)s.%(ext)s')
+
+    const args: string[] = []
+    if (proxy) args.push('--proxy', proxy.url)
+    args.push(
+      '--skip-download',
+      '--write-auto-sub',
+      '--write-sub',
+      '--sub-lang', 'en.*,en',
+      '--sub-format', 'vtt',
+      '--no-warnings',
+      '--no-playlist',
+      '--no-progress',
+      '-o', outputTemplate,
+      `https://www.youtube.com/watch?v=${videoId}`,
+    )
+
+    await execFileP('yt-dlp', args, {
+      timeout: 90_000,
+      maxBuffer: 4 * 1024 * 1024,
+    })
+
+    // yt-dlp writes <id>.<lang>.vtt — find whichever language landed
+    const fs = await import('fs/promises')
+    const files = await fs.readdir(workDir)
+    const vttFile = files.find((f) => f.endsWith('.vtt'))
+    if (!vttFile) {
+      console.log(`[transcript] yt-dlp ${videoId}: no VTT file produced`)
+      return null
+    }
+
+    const vtt = await readFile(join(workDir, vttFile), 'utf-8')
+    const text = parseVtt(vtt)
+    if (!text) {
+      console.log(`[transcript] yt-dlp ${videoId}: VTT parsed empty`)
+      return null
+    }
+
+    // Filename like dQw4w9WgXcQ.en.vtt → "en"
+    const langMatch = vttFile.match(/\.([a-zA-Z-]+)\.vtt$/)
+    return {
+      text,
+      language: langMatch?.[1] || 'en',
+      type: 'auto-generated',
+    }
+  } catch (e: any) {
+    const msg = (e?.stderr || e?.message || '').toString().slice(0, 300)
+    console.log(`[transcript] yt-dlp ${videoId} failed: ${msg}`)
+    return null
+  } finally {
+    if (workDir) {
+      try {
+        await rm(workDir, { recursive: true, force: true })
+      } catch {
+        /* ignore cleanup errors */
+      }
+    }
+  }
+}
+
 export async function getVideoTranscript(
   videoId: string,
 ): Promise<TranscriptResult> {
-  // Cookies are optional. With a clean residential proxy, no cookies works
-  // best (sending the default consent cookie triggers LOGIN_REQUIRED).
+  // ── Primary: yt-dlp ──────────────────────────────────────────────────────
+  // yt-dlp uses alternate client identities (Android VR, etc.) and signature
+  // deciphering to bypass the bot detection that blocks our raw HTTP path.
+  const ytdlpResult = await getTranscriptViaYtDlp(videoId)
+  if (ytdlpResult) {
+    console.log(`[transcript] ✅ ${videoId} via yt-dlp`)
+    return ytdlpResult
+  }
+
+  // ── Fallback methods (rarely succeed in 2026, but kept as safety net) ────
 
   // ── Method 1: Scrape watch page ──────────────────────────────────────────
   try {
